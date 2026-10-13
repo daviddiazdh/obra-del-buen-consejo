@@ -1,0 +1,64 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-obc}
+      POSTGRES_USER: ${POSTGRES_USER:-obc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      TZ: ${TZ:-America/Caracas}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-obc} -d ${POSTGRES_DB:-obc}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  api:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-obc}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-obc}
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      BOOTSTRAP_USER: ${BOOTSTRAP_USER:-admin}
+      BOOTSTRAP_PASSWORD: ${BOOTSTRAP_PASSWORD:?Set BOOTSTRAP_PASSWORD in .env}
+      BOOTSTRAP_NAME: ${BOOTSTRAP_NAME:-Administrador del sistema}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      SCHOOL_TIMEZONE: ${SCHOOL_TIMEZONE:-America/Caracas}
+      TZ: ${TZ:-America/Caracas}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/certs:/etc/nginx/certs:ro
+    depends_on:
+      - api
+
+  telegram-bot:
+    build:
+      context: ./backend
+    command: ["python", "telegram_bot.py"]
+    restart: unless-stopped
+    profiles: ["telegram"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-obc}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-obc}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
