@@ -1,10 +1,17 @@
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 
+from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from sqlalchemy import select
+
+project_root = Path(__file__).resolve().parent.parent
+load_dotenv(project_root / ".env")
+load_dotenv(project_root / ".env.local")
 
 from database import SessionLocal
 from models import Guardian
@@ -26,9 +33,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("El enlace no es válido o ya fue utilizado. Solicita uno nuevo al colegio.")
             return
         guardian.telegram_chat_id = str(update.effective_chat.id)
+        guardian.telegram_linked_at = datetime.now(timezone.utc)
         guardian.telegram_link_token = os.urandom(24).hex()
+        guardian_name = guardian.full_name
         db.commit()
-    await update.message.reply_text("Cuenta vinculada. Recibirás aquí los avisos del colegio.")
+    institution = os.getenv("INSTITUTION_NAME", "Obra del Buen Consejo")
+    await update.message.reply_text(f"¡Hola {guardian_name}! Tu cuenta ha sido vinculada exitosamente con {institution} para recibir notificaciones.")
 
 
 async def run_bot() -> None:

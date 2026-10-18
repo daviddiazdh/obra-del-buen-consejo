@@ -3,8 +3,9 @@ import type { FormEvent } from 'react'
 import { CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, DoorOpen, LoaderCircle, Pencil, Search, Send, Trash2, UserRound, X } from 'lucide-react'
 
 type Page<T> = { items: T[]; page: number; page_size: number; total: number; pages: number }
-type Guardian = { id: number; full_name: string; document_id: string }
-type Citation = { id: number; guardian_id: number; guardian_name: string; guardian_document: string; student_names: string; student_documents: string; scheduled_at: string; reason: string; status: string; guardian_confirmed: boolean }
+type Guardian = { id: number; full_name: string; document_id: string; telegram_linked?: boolean }
+type TelegramStatus = 'NOT_SENT' | 'SENT' | 'FAILED' | 'NOT_LINKED'
+type Citation = { id: number; guardian_id: number; guardian_name: string; guardian_document: string; guardian_telegram_linked: boolean; student_names: string; student_documents: string; scheduled_at: string; reason: string; status: string; guardian_confirmed: boolean; telegram_status: TelegramStatus; telegram_sent_at: string | null; telegram_error_log: string | null }
 type ViewMode = 'today' | 'history'
 
 function localDateTime(value: string | Date) {
@@ -58,9 +59,12 @@ function CitationsView({ token, role }: { token: string; role: string }) {
   const [reload, setReload] = useState(0)
   const [citations, setCitations] = useState<Page<Citation>>({ items: [], page: 1, page_size: 10, total: 0, pages: 0 })
   const [selectedGuardian, setSelectedGuardian] = useState<Guardian | null>(null)
+  const [guardianPickerVersion, setGuardianPickerVersion] = useState(0)
   const [editCitation, setEditCitation] = useState<Citation | null>(null)
   const [formMessage, setFormMessage] = useState('')
+  const [formMessageError, setFormMessageError] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [sendingCitationId, setSendingCitationId] = useState<number | null>(null)
   const canSchedule = role === 'admin' || role === 'coordinator'
   const canManage = canSchedule
   const scheduleDefault = localDateTime(new Date(Date.now() + 86_400_000))
@@ -96,18 +100,57 @@ function CitationsView({ token, role }: { token: string; role: string }) {
       const response = await fetch('/api/citations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ guardian_id: selectedGuardian.id, scheduled_at: new Date(String(form.get('scheduled_at'))).toISOString(), reason: form.get('reason') }),
+        body: JSON.stringify({ guardian_id: selectedGuardian.id, scheduled_at: new Date(String(form.get('scheduled_at'))).toISOString(), reason: form.get('reason'), notify_telegram: form.get('notify_telegram') === 'on' }),
       })
       const result = await response.json()
       if (!response.ok) throw new Error(result.detail || 'No se pudo agendar la citación.')
       setSelectedGuardian(null)
+      setGuardianPickerVersion((version) => version + 1)
       formElement.reset()
-      setFormMessage('Citación agendada. Se envió el aviso al representante si tiene Telegram vinculado.')
+      const notificationMessage = result.telegram_status === 'SENT'
+        ? ' La notificación por Telegram fue enviada.'
+        : result.telegram_status === 'NOT_LINKED'
+          ? ' El representante aún no ha vinculado su cuenta de Telegram.'
+          : result.telegram_status === 'FAILED'
+            ? ` No se pudo enviar la notificación por Telegram: ${result.telegram_error_log || 'error desconocido'}.`
+            : ' No se envió la notificación por Telegram.'
+      setFormMessage(`Citación agendada.${notificationMessage}`)
+      setFormMessageError(result.telegram_status === 'FAILED')
       setPage(1)
       setReload((value) => value + 1)
     } catch (error) {
       setFormMessage(error instanceof Error ? error.message : 'No se pudo agendar la citación.')
+      setFormMessageError(true)
     } finally { setBusy(false) }
+  }
+
+  async function sendTelegram(citation: Citation) {
+    if (!citation.guardian_telegram_linked) {
+      setFormMessage('El representante aún no ha vinculado su cuenta de Telegram.')
+      setFormMessageError(true)
+      return
+    }
+    setSendingCitationId(citation.id)
+    setFormMessage('')
+    setFormMessageError(false)
+    try {
+      const response = await fetch(`/api/citations/${citation.id}/send-telegram`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+      const result: Citation & { detail?: string } = await response.json()
+      if (!response.ok) throw new Error(result.detail || 'No se pudo enviar la notificación por Telegram.')
+      setCitations((current) => ({ ...current, items: current.items.map((item) => item.id === citation.id ? result : item) }))
+      if (result.telegram_status === 'SENT') {
+        setFormMessage('Notificación enviada por Telegram.')
+      } else {
+        setFormMessage(result.telegram_error_log || 'No se pudo enviar la notificación por Telegram.')
+        setFormMessageError(true)
+      }
+    } catch (error) {
+      setFormMessage(error instanceof Error ? error.message : 'No se pudo enviar la notificación por Telegram.')
+      setFormMessageError(true)
+      setReload((value) => value + 1)
+    } finally {
+      setSendingCitationId(null)
+    }
   }
 
   async function updateStatus(id: number, status: string) {
@@ -132,9 +175,10 @@ function CitationsView({ token, role }: { token: string; role: string }) {
   return <section className="content-wrap citation-page">
     <div className="page-heading"><div><p className="eyebrow">PORTERÍA · AGENDA</p><h1>{guardianId !== null ? `Citaciones · ${guardianName}` : 'Citaciones'}</h1><p className="page-subtitle">Agenda diaria y todo el historial, con búsqueda por representante o alumno.</p></div>{guardianId !== null && <button className="secondary-button" onClick={() => { setGuardianId(null); setGuardianName(''); setPage(1) }}>Ver todas</button>}</div>
     {!guardianId && <div className="citation-modes" role="tablist" aria-label="Período de citaciones"><button type="button" role="tab" aria-selected={mode === 'today'} className={mode === 'today' ? 'active' : ''} onClick={() => { setMode('today'); setPage(1) }}><CalendarDays size={16} />Hoy</button><button type="button" role="tab" aria-selected={mode === 'history'} className={mode === 'history' ? 'active' : ''} onClick={() => { setMode('history'); setPage(1) }}><Clock3 size={16} />Historial</button></div>}
-    {canSchedule && !guardianId && <form className="citation-scheduler" onSubmit={submitCitation}><div className="section-title"><span className="step-number"><CalendarDays size={14} /></span><div><h2>Agendar representante</h2><p>Elige un horario disponible; se bloquean las citas duplicadas.</p></div></div><div className="scheduler-fields"><GuardianSearch token={token} onSelect={setSelectedGuardian} /><label className="field-label">Fecha y hora<input name="scheduled_at" type="datetime-local" required defaultValue={scheduleDefault} /></label><label className="field-label">Motivo<input name="reason" required minLength={3} maxLength={2000} placeholder="Motivo de la citación" /></label><button className="submit-button" type="submit" disabled={busy || !selectedGuardian}>{busy ? <LoaderCircle className="spin" size={17} /> : <Send size={16} />}Agendar cita</button></div>{formMessage && <p className="form-message" role="status">{formMessage}</p>}</form>}
+    {canSchedule && !guardianId && <form className="citation-scheduler" onSubmit={submitCitation}><div className="section-title"><span className="step-number"><CalendarDays size={14} /></span><div><h2>Agendar representante</h2><p>Elige un horario disponible; se bloquean las citas duplicadas.</p></div></div><div className="scheduler-fields"><GuardianSearch key={guardianPickerVersion} token={token} onSelect={setSelectedGuardian} /><label className="field-label">Fecha y hora<input name="scheduled_at" type="datetime-local" required defaultValue={scheduleDefault} /></label><label className="field-label">Motivo<input name="reason" required minLength={3} maxLength={2000} placeholder="Motivo de la citación" /></label><button className="submit-button" type="submit" disabled={busy || !selectedGuardian}>{busy ? <LoaderCircle className="spin" size={17} /> : <Send size={16} />}Agendar cita</button></div>{selectedGuardian && !selectedGuardian.telegram_linked && <p className="telegram-link-warning">El representante aún no ha vinculado su cuenta de Telegram.</p>}<label className="citation-telegram-option"><input type="checkbox" name="notify_telegram" defaultChecked />Enviar notificación por Telegram al guardar</label>{formMessage && <p className={`form-message ${formMessageError ? '' : 'success'}`} role={formMessageError ? 'alert' : 'status'}>{formMessage}</p>}</form>}
     <label className="agenda-search"><Search size={18} /><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1) }} placeholder="Buscar representante, cédula o estudiante" /></label>
-    <div className="citation-list">{citations.items.map((item) => <article className="citation-card" key={item.id}><div className="citation-info"><span className="citation-time">{new Intl.DateTimeFormat('es', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(item.scheduled_at))}</span><span><button type="button" className="citation-guardian-link" onClick={() => openGuardianHistory(item)}>{item.guardian_name}</button><small>{item.student_names} · C.I. {item.guardian_document}</small><small>{item.reason}</small></span><span className={`citation-status status-${item.status}`}>{item.status === 'pending' ? 'Pendiente' : item.status === 'attended' ? 'Atendido' : item.status === 'no_show' ? 'No asistió' : 'Cancelada'}</span></div><div className="citation-actions"><button onClick={() => openGuardianHistory(item)}><Clock3 size={15} />Historial</button>{item.status === 'pending' && role === 'doorman' && <><button onClick={() => updateStatus(item.id, 'attended')}><Check size={15} />Atendido</button><button onClick={() => updateStatus(item.id, 'no_show')}><X size={15} />No asistió</button></>}{canManage && item.status !== 'cancelled' && <><button onClick={() => setEditCitation(item)}><Pencil size={15} />Editar</button><button onClick={() => void cancelCitation(item.id)}><Trash2 size={15} />Cancelar</button></>}</div></article>)}{citations.items.length === 0 && <div className="empty-state schedule-empty"><DoorOpen size={30} /><strong>{search ? 'No hay coincidencias' : 'Sin citaciones en esta vista'}</strong><span>{search ? 'Prueba otro nombre o documento.' : mode === 'today' ? 'No hay representantes citados hoy.' : 'Aún no hay citaciones históricas.'}</span></div>}</div>
+    {canManage && (guardianId !== null || !canSchedule) && formMessage && <p className={`form-message citation-action-message ${formMessageError ? '' : 'success'}`} role={formMessageError ? 'alert' : 'status'}>{formMessage}</p>}
+    <div className="citation-list">{citations.items.map((item) => <article className="citation-card" key={item.id}><div className="citation-info"><span className="citation-time">{new Intl.DateTimeFormat('es', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(item.scheduled_at))}</span><span><button type="button" className="citation-guardian-link" onClick={() => openGuardianHistory(item)}>{item.guardian_name}</button><small>{item.student_names} · C.I. {item.guardian_document}</small><small>{item.reason}</small></span><span className={`citation-status status-${item.status}`}>{item.status === 'pending' ? 'Pendiente' : item.status === 'attended' ? 'Atendido' : item.status === 'no_show' ? 'No asistió' : 'Cancelada'}</span><span className={`telegram-delivery telegram-${item.telegram_status.toLowerCase()}`} title={!item.guardian_telegram_linked ? 'El representante aún no ha vinculado su cuenta de Telegram' : item.telegram_status === 'SENT' && item.telegram_sent_at ? `Enviado: ${new Intl.DateTimeFormat('es', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(item.telegram_sent_at))}` : item.telegram_error_log || undefined}>{item.telegram_status === 'SENT' ? 'Enviado' : item.telegram_status === 'NOT_LINKED' ? 'Sin vincular' : item.telegram_status === 'FAILED' ? 'Error al enviar' : 'No enviado'}</span></div><div className="citation-actions"><button onClick={() => openGuardianHistory(item)}><Clock3 size={15} />Historial</button>{canManage && <button type="button" disabled={!item.guardian_telegram_linked || item.status === 'cancelled' || sendingCitationId === item.id} title={!item.guardian_telegram_linked ? 'El representante aún no ha vinculado su cuenta de Telegram' : undefined} onClick={() => void sendTelegram(item)}><Send size={15} />{sendingCitationId === item.id ? 'Enviando…' : item.telegram_status === 'SENT' ? 'Reenviar Telegram' : item.telegram_status === 'FAILED' ? 'Reintentar Telegram' : 'Enviar por Telegram'}</button>}{item.status === 'pending' && role === 'doorman' && <><button onClick={() => updateStatus(item.id, 'attended')}><Check size={15} />Atendido</button><button onClick={() => updateStatus(item.id, 'no_show')}><X size={15} />No asistió</button></>}{canManage && item.status !== 'cancelled' && <><button onClick={() => setEditCitation(item)}><Pencil size={15} />Editar</button><button onClick={() => void cancelCitation(item.id)}><Trash2 size={15} />Cancelar</button></>}</div></article>)}{citations.items.length === 0 && <div className="empty-state schedule-empty"><DoorOpen size={30} /><strong>{search ? 'No hay coincidencias' : 'Sin citaciones en esta vista'}</strong><span>{search ? 'Prueba otro nombre o documento.' : mode === 'today' ? 'No hay representantes citados hoy.' : 'Aún no hay citaciones históricas.'}</span></div>}</div>
     <PageControls page={citations.page} pages={citations.pages} total={citations.total} onPage={setPage} />
     {editCitation && <CitationEditor item={editCitation} token={token} onClose={() => setEditCitation(null)} onSaved={() => { setEditCitation(null); setPage(1); setReload((value) => value + 1) }} />}
   </section>

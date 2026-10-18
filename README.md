@@ -25,8 +25,9 @@ La cámara usa `@zxing/browser` con `facingMode: environment` para preferir la c
 | Tabla | Campos principales | Relaciones |
 | --- | --- | --- |
 | `users` | id PK, username UNIQUE, full_name, password_hash, role, guardian_id FK nullable UNIQUE, active | Cuenta institucional; guardian_id asocia un usuario representante |
-| `sections` | id PK, year_level (1–5), name, active, UNIQUE(year_level, name) | Una sección tiene muchos alumnos y profesor responsable |
-| `subjects` | id PK, name UNIQUE, active | Materias asignables al profesor |
+| `sections` | id PK, year_level (1–5), name, active, UNIQUE(year_level, name) | Una sección tiene muchos alumnos y un profesor responsable; relación N:M con materias |
+| `subjects` | id PK, name UNIQUE, active | Materias del catálogo asociables a uno o varios cursos |
+| `section_subjects` | section_id FK + subject_id FK PK compuesta | Materias disponibles en cada curso |
 | `teacher_sections` | id PK, teacher_id FK, section_id FK, subject_id FK nullable | Asignación profesor-sección-materia; combinación UNIQUE |
 | `students` | id PK, first_name, last_name, document_id UNIQUE, qr_token UNIQUE, section_id FK, active | Pertenece a sección; relación N:M con representantes/reportes |
 | `guardians` | id PK, full_name, document_id UNIQUE, phone, email, telegram_chat_id UNIQUE, telegram_link_token UNIQUE, active | Uno o varios estudiantes por representante |
@@ -36,14 +37,14 @@ La cámara usa `@zxing/browser` con `facingMode: environment` para preferir la c
 | `citations` | id PK, report_id FK nullable, guardian_id FK, scheduled_at, reason, status, guardian_confirmed, attended_at, created_by FK | Agenda; cancelar cambia status a cancelled y conserva el registro |
 | `message_logs` | id PK, guardian_id FK, report_id FK nullable, channel, body, status, sent_at, created_at | Bitácora de notificaciones Telegram |
 
-Las bajas administrativas son lógicas para conservar el historial y las relaciones. El arranque añade columnas compatibles del prototipo anterior; cambios estructurales futuros deben versionarse con migraciones antes de un despliegue con datos reales.
+Las bajas administrativas son lógicas para conservar el historial y las relaciones. El arranque crea tablas nuevas, añade columnas compatibles del prototipo anterior y migra las asociaciones curso-materia existentes; cambios estructurales futuros deben versionarse con migraciones antes de un despliegue con datos reales.
 
 ## Roles
 
 | Rol | Alcance implementado en API |
 | --- | --- |
 | `admin` | CRUD y paginación de cuentas, cursos, materias, alumnos, representantes y reportes; carga masiva |
-| `coordinator` | Reportes, expediente, agenda y enlace Telegram |
+| `coordinator` | Historial general de reportes, expediente, agenda y enlace Telegram |
 | `teacher` | Alumnos y reportes limitados a secciones asignadas |
 | `doorman` | Agenda del día, búsqueda y cambio de estado de citación |
 | `guardian` | Solo estudiantes vinculados, sus reportes, citaciones y mensajes |
@@ -70,16 +71,17 @@ Todas usan prefijo `/api`; excepto health y login, requieren `Authorization: Bea
 | `GET /students/{id}/summary` | Admin/coordinator/teacher | Expediente 360°, gravedad, reportes, representantes y citas |
 | `POST /reports`, `GET /reports?page=&page_size=&q=&student_id=`, `PATCH /reports/{id}`, `DELETE /reports/{id}` | Admin/coordinator/teacher | CRUD y búsqueda de reportes individuales/grupales con control de sección |
 | `POST /import/students` | Admin | Importa CSV/XLSX, validación completa y transacción |
-| `POST /citations`, `GET /citations?page=&page_size=&q=&day=` | Admin/coordinator/doorman | Sin `day` consulta todo el historial; con `day` limita a una fecha |
+| `POST /citations`, `GET /citations?page=&page_size=&q=&day=` | Admin/coordinator/doorman | Permite elegir envío Telegram al agendar; expone estado del envío y enlace del representante |
 | `GET /guardians/{id}/citations?page=&page_size=` | Admin/coordinator/doorman | Historial de un representante |
 | `PATCH /citations/{id}`, `DELETE /citations/{id}` | Admin/coordinator | Edita o cancela (mantiene la auditoría); bloquea citas duplicadas por representante/horario |
+| `POST /citations/{id}/send-telegram` | Admin/coordinator | Envía o reintenta una notificación de citación y registra resultado/fecha/error |
 | `PATCH /citations/{id}/status` | Admin/coordinator/doorman | `pending`, `attended`, `no_show` o `cancelled` |
 | `GET /guardians/{id}/telegram-link` | Admin/coordinator | Enlace de vinculación de Telegram de un solo uso |
 | `GET /messages?guardian_id=...` | Admin/coordinator/guardian | Bitácora; el representante solo consulta la suya |
 | `GET /guardian/summary` | Guardian | Datos exclusivos del representante autenticado |
 | `POST /webhooks/telegram` | Telegram (secreto requerido) | Vincula un chat con `/start <token>` mediante `X-Telegram-Bot-Api-Secret-Token` |
 
-Todas las listas limitan la página a 100 filas como máximo. OpenAPI interactivo: `https://<IP-del-servidor>/api/docs`.
+Todas las listas limitan la página a 100 filas como máximo. El historial general permite buscar reportes por descripción, estudiante, documento, materia o lugar; administración y coordinación pueden incluir registros desactivados. OpenAPI interactivo: `https://<IP-del-servidor>/api/docs`.
 
 ## Ejecución local en LAN (Docker)
 
@@ -105,7 +107,7 @@ docker compose up -d --build
 
 Abre `https://192.168.1.20`, inicia sesión con `BOOTSTRAP_USER`/`BOOTSTRAP_PASSWORD` de `.env`. El puerto 80 redirige a HTTPS. El usuario bootstrap se crea únicamente al inicializar la base vacía; cambia su clave con `POST /api/auth/password` después de iniciar sesión.
 
-Para activar Telegram en una escuela dentro de una LAN, configura `TELEGRAM_BOT_TOKEN` y `TELEGRAM_BOT_USERNAME` y levanta el perfil de polling: `docker compose --profile telegram up -d --build`. El enlace personal abre `/start <token>` y asocia el chat. La API también ofrece `POST /api/webhooks/telegram`, protegido por `TELEGRAM_WEBHOOK_SECRET` y el header `X-Telegram-Bot-Api-Secret-Token`, si el servidor tiene HTTPS públicamente accesible; configura el webhook desde la API de Telegram y no ejecutes el perfil de polling a la vez. Para una LAN aislada, polling saliente es el modo compatible. Si no hay token/chat enlazado, el envío queda registrado como `unavailable` sin bloquear el reporte.
+Para activar Telegram en desarrollo local, coloca únicamente el token de BotFather en `TELEGRAM_BOT_TOKEN` dentro del archivo privado `.env.local` (ya ignorado por Git) y reinicia el backend. El servicio consulta `getMe` para descubrir el nombre público del bot; no hace falta configurar el usuario. Para Docker, configura ese mismo token en `.env` y levanta el perfil de polling con `docker compose --profile telegram up -d --build`. `INSTITUTION_NAME` tiene un valor por defecto configurable y `TELEGRAM_BOT_USERNAME` es un override opcional. El representante inicia sesión en el portal familiar, pulsa **Vincular Telegram** y luego **Iniciar** en el bot; el sistema guarda el chat y la fecha de vinculación. La API también ofrece `POST /api/webhooks/telegram`, protegido por `TELEGRAM_WEBHOOK_SECRET` y el header `X-Telegram-Bot-Api-Secret-Token`, si el servidor tiene HTTPS públicamente accesible; configura el webhook desde la API de Telegram y no ejecutes el perfil de polling a la vez. Para una LAN aislada, polling saliente es el modo compatible. En la agenda, cada citación muestra el estado Telegram; administración y coordinación pueden enviar o reintentar la notificación. Al agendar, el envío está habilitado por defecto y se puede desmarcar. Los intentos sin vínculo o con error quedan reflejados en la citación y en la bitácora de mensajes.
 
 El importador acepta `.xlsx` y `.csv`, máximo 10 MB. Usa la plantilla `deploy/plantilla-estudiantes.csv`; columnas obligatorias: `nombres, apellidos, documento, anio, seccion`; opcionales: `representante, documento_representante, telefono, correo`. Si alguna fila no es válida no se inserta ninguna. También puedes crear cursos, estudiantes, representantes y cuentas desde Administración sin Excel; el QR estudiantil se genera al guardar.
 
@@ -117,14 +119,19 @@ python -m venv .venv
 npm install
 
 # Terminal 1: API local con SQLite y administrador de desarrollo
-$env:DATABASE_URL='sqlite:///./school.db'
+# Configuración privada de Telegram (al habilitarlo, completa TELEGRAM_BOT_TOKEN en .env.local)
+$env:DATABASE_URL='sqlite:///./local-dev.db'
 $env:BOOTSTRAP_USER='admin'
 $env:BOOTSTRAP_PASSWORD='Development-Only-ChangeMe-2026'
 $env:SECRET_KEY='development-only-secret-key-replace-this-value'
 .\.venv\Scripts\python.exe -m uvicorn main:app --app-dir backend --host 127.0.0.1 --port 8000
 
 # Terminal 2: interfaz Vite (proxy /api hacia la terminal 1)
-npm run dev -- --host 127.0.0.1
+npm run dev
+
+# Terminal 3: escucha las vinculaciones /start de Telegram (solo cuando el token esté configurado)
+$env:PYTHONPATH='backend'
+.\.venv\Scripts\python.exe backend\telegram_bot.py
 ```
 
 Abre `http://localhost:5173` e inicia con `admin` / `Development-Only-ChangeMe-2026`. Son credenciales solo de desarrollo; no las uses en una red compartida.

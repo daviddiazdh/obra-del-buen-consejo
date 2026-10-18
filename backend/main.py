@@ -4,10 +4,12 @@ import unicodedata
 import hmac
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from jose import jwt
@@ -15,9 +17,13 @@ from sqlalchemy import delete, func, inspect as sa_inspect, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
+project_root = Path(__file__).resolve().parent.parent
+load_dotenv(project_root / ".env")
+load_dotenv(project_root / ".env.local")
+
 from database import Base, SessionLocal, engine, get_db
-from models import Citation, Guardian, MessageLog, Report, Section, Student, Subject, TeacherSection, User
-from notifications import send_citation_alert, send_report_alert, send_telegram_text
+from models import Citation, Guardian, MessageLog, Report, Section, SectionSubject, Student, Subject, TeacherSection, User
+from notifications import TelegramConfigurationError, send_citation_alert, send_report_alert, send_telegram_text, telegram_bot_username
 from schemas import CitationCreate, CitationStatus, CitationUpdate, GuardianCreate, GuardianUpdate, LoginRequest, PasswordChange, ReportCreate, ReportOut, ReportUpdate, SectionCreate, SectionUpdate, StudentCreate, StudentOut, StudentUpdate, SubjectCreate, SubjectUpdate, TeacherAssignment, TokenResponse, UserCreate, UserUpdate
 from security import allow_roles, create_access_token, hash_password, verify_password
 
@@ -69,9 +75,14 @@ def ensure_schema() -> None:
         "users": {"guardian_id": "INTEGER"},
         "sections": {"active": "BOOLEAN NOT NULL DEFAULT TRUE"},
         "subjects": {"active": "BOOLEAN NOT NULL DEFAULT TRUE"},
-        "guardians": {"active": "BOOLEAN NOT NULL DEFAULT TRUE"},
+        "guardians": {"active": "BOOLEAN NOT NULL DEFAULT TRUE", "telegram_linked_at": "TIMESTAMP WITH TIME ZONE"},
         "reports": {"active": "BOOLEAN NOT NULL DEFAULT TRUE", "action_taken": "TEXT"},
-        "citations": {"guardian_confirmed": "BOOLEAN NOT NULL DEFAULT FALSE"},
+        "citations": {
+            "guardian_confirmed": "BOOLEAN NOT NULL DEFAULT FALSE",
+            "telegram_status": "VARCHAR(20) NOT NULL DEFAULT 'NOT_SENT'",
+            "telegram_sent_at": "TIMESTAMP WITH TIME ZONE",
+            "telegram_error_log": "TEXT",
+        },
     }
     inspector = sa_inspect(engine)
     with engine.begin() as connection:
@@ -80,6 +91,32 @@ def ensure_schema() -> None:
             for name, definition in columns.items():
                 if name not in existing:
                     connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}"))
+    with SessionLocal() as db:
+        legacy_links = db.execute(
+            select(TeacherSection.section_id, TeacherSection.subject_id)
+            .where(TeacherSection.subject_id.is_not(None))
+        ).all()
+        for section_id, subject_id in legacy_links:
+            if db.get(SectionSubject, (section_id, subject_id)) is None:
+                db.add(SectionSubject(section_id=section_id, subject_id=subject_id))
+        db.commit()
+
+
+def replace_section_subjects(db: Session, section_id: int, subject_ids: list[int]) -> None:
+    if len(set(subject_ids)) != len(subject_ids):
+        raise HTTPException(status_code=422, detail="No repitas materias en el curso")
+    subjects = db.scalars(select(Subject).where(Subject.id.in_(subject_ids), Subject.active.is_(True))).all() if subject_ids else []
+    if len(subjects) != len(subject_ids):
+        raise HTTPException(status_code=404, detail="Una o más materias no existen o están inactivas")
+    db.execute(delete(SectionSubject).where(SectionSubject.section_id == section_id))
+    assignments = delete(TeacherSection).where(
+        TeacherSection.section_id == section_id,
+        TeacherSection.subject_id.is_not(None),
+    )
+    if subject_ids:
+        assignments = assignments.where(TeacherSection.subject_id.not_in(subject_ids))
+    db.execute(assignments)
+    db.add_all(SectionSubject(section_id=section_id, subject_id=subject.id) for subject in subjects)
 
 
 def normalize_header(value: object) -> str:
@@ -122,9 +159,10 @@ def telegram_webhook(
         background_tasks.add_task(send_telegram_text, chat_id, "Enlace no válido. Solicita uno nuevo al colegio.")
         return {"ok": True}
     guardian.telegram_chat_id = str(chat_id)
+    guardian.telegram_linked_at = datetime.now(timezone.utc)
     guardian.telegram_link_token = os.urandom(24).hex()
     db.commit()
-    background_tasks.add_task(send_telegram_text, chat_id, "Cuenta vinculada. Recibirás avisos del colegio por este medio.")
+    background_tasks.add_task(send_telegram_text, chat_id, f"¡Hola {guardian.full_name}! Tu cuenta ha sido vinculada exitosamente con {os.getenv('INSTITUTION_NAME', 'Obra del Buen Consejo')} para recibir notificaciones.")
     return {"ok": True}
 
 
@@ -232,7 +270,13 @@ def section_view(db: Session, section: Section) -> dict:
     teacher = db.get(User, assignment.teacher_id) if assignment else None
     if teacher is not None and not teacher.active:
         teacher = None
-    return {"id": section.id, "year_level": section.year_level, "name": section.name, "active": section.active, "teacher_id": teacher.id if teacher else None, "teacher_name": teacher.full_name if teacher else None}
+    subjects = db.scalars(
+        select(Subject)
+        .join(SectionSubject, SectionSubject.subject_id == Subject.id)
+        .where(SectionSubject.section_id == section.id, Subject.active.is_(True))
+        .order_by(Subject.name)
+    ).all()
+    return {"id": section.id, "year_level": section.year_level, "name": section.name, "active": section.active, "teacher_id": teacher.id if teacher else None, "teacher_name": teacher.full_name if teacher else None, "subject_ids": [subject.id for subject in subjects], "subject_names": [subject.name for subject in subjects]}
 
 
 @app.post("/api/sections", status_code=201)
@@ -247,6 +291,7 @@ def create_section(payload: SectionCreate, db: Db, _: User = Depends(allow_roles
     db.add(section)
     try:
         db.flush()
+        replace_section_subjects(db, section.id, payload.subject_ids)
         if teacher:
             db.add(TeacherSection(teacher_id=teacher.id, section_id=section.id))
         db.commit()
@@ -264,6 +309,7 @@ def update_section(section_id: int, payload: SectionUpdate, db: Db, _: User = De
         raise HTTPException(status_code=404, detail="Curso no encontrado")
     values = payload.model_dump(exclude_unset=True)
     teacher_id = values.pop("teacher_id", ...)
+    subject_ids = values.pop("subject_ids", ...)
     if "name" in values:
         values["name"] = values["name"].strip().upper()
         if not values["name"]:
@@ -277,6 +323,8 @@ def update_section(section_id: int, payload: SectionUpdate, db: Db, _: User = De
             raise HTTPException(status_code=404, detail="Profesor activo no encontrado")
     for key, value in values.items():
         setattr(section, key, value)
+    if subject_ids is not ... and subject_ids is not None:
+        replace_section_subjects(db, section.id, subject_ids)
     if teacher_id is not ...:
         db.execute(delete(TeacherSection).where(TeacherSection.section_id == section.id, TeacherSection.subject_id.is_(None)))
         if teacher:
@@ -315,7 +363,7 @@ def list_guardians(
         query = query.where(or_(Guardian.full_name.ilike(term), Guardian.document_id.ilike(term), Guardian.phone.ilike(term), Guardian.email.ilike(term)))
     query = query.options(joinedload(Guardian.students))
     guardians, total = paged_rows(db, query, page, page_size)
-    items = [{"id": guardian.id, "full_name": guardian.full_name, "document_id": guardian.document_id, "phone": guardian.phone, "email": guardian.email, "active": guardian.active, "student_ids": [student.id for student in guardian.students], "student_names": ", ".join(f"{student.first_name} {student.last_name}" for student in guardian.students)} for guardian in guardians]
+    items = [{"id": guardian.id, "full_name": guardian.full_name, "document_id": guardian.document_id, "phone": guardian.phone, "email": guardian.email, "active": guardian.active, "telegram_linked": bool(guardian.telegram_chat_id), "student_ids": [student.id for student in guardian.students], "student_names": ", ".join(f"{student.first_name} {student.last_name}" for student in guardian.students)} for guardian in guardians]
     return page_payload(items, total, page, page_size)
 
 
@@ -374,8 +422,10 @@ def deactivate_guardian(guardian_id: int, db: Db, _: User = Depends(allow_roles(
 
 
 @app.get("/api/subjects")
-def list_subjects(db: Db, q: str = "", page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), include_inactive: bool = False, _: User = Depends(allow_roles("admin", "coordinator"))):
+def list_subjects(db: Db, q: str = "", page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), include_inactive: bool = False, section_id: int | None = None, _: User = Depends(allow_roles("admin", "coordinator"))):
     query = select(Subject).order_by(Subject.name)
+    if section_id is not None:
+        query = query.join(SectionSubject, SectionSubject.subject_id == Subject.id).where(SectionSubject.section_id == section_id)
     if not include_inactive:
         query = query.where(Subject.active.is_(True))
     if q.strip():
@@ -435,6 +485,8 @@ def assign_teacher_section(teacher_id: int, payload: TeacherAssignment, db: Db, 
         raise HTTPException(status_code=404, detail="Materia no encontrada")
     assignment = TeacherSection(teacher_id=teacher.id, section_id=payload.section_id, subject_id=payload.subject_id)
     db.add(assignment)
+    if payload.subject_id is not None and db.get(SectionSubject, (payload.section_id, payload.subject_id)) is None:
+        db.add(SectionSubject(section_id=payload.section_id, subject_id=payload.subject_id))
     try:
         db.commit()
     except IntegrityError as exc:
@@ -479,7 +531,13 @@ def list_students(
         assigned = select(TeacherSection.section_id).where(TeacherSection.teacher_id == user.id)
         query = query.where(Student.section_id.in_(assigned))
     students, total = paged_rows(db, query, page, page_size)
-    items = [{**StudentOut(id=s.id, first_name=s.first_name, last_name=s.last_name, document_id=s.document_id, qr_token=s.qr_token, section_name=f"{s.section.year_level}° {s.section.name}").model_dump(), "active": s.active, "section_id": s.section_id, "guardian_ids": [guardian.id for guardian in s.guardians]} for s in students]
+    items = [{
+        **StudentOut(id=s.id, first_name=s.first_name, last_name=s.last_name, document_id=s.document_id, qr_token=s.qr_token, section_name=f"{s.section.year_level}° {s.section.name}").model_dump(),
+        "active": s.active,
+        "section_id": s.section_id,
+        "guardian_ids": [guardian.id for guardian in s.guardians],
+        "guardians": [{"id": guardian.id, "full_name": guardian.full_name, "document_id": guardian.document_id, "active": guardian.active} for guardian in s.guardians],
+    } for s in students]
     return page_payload(items, total, page, page_size)
 
 
@@ -598,17 +656,35 @@ def list_reports(
     student_id: int | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    include_inactive: bool = False,
 ):
-    query = select(Report).options(joinedload(Report.students)).where(Report.active.is_(True)).order_by(Report.created_at.desc())
+    query = select(Report).options(joinedload(Report.students)).order_by(Report.created_at.desc())
+    if not include_inactive or user.role == "teacher":
+        query = query.where(Report.active.is_(True))
     if student_id is not None:
         query = query.join(Report.students).where(Student.id == student_id)
     if q.strip():
-        query = query.where(Report.description.ilike(f"%{q.strip()}%"))
+        term = f"%{q.strip()}%"
+        query = query.where(or_(
+            Report.description.ilike(term),
+            Report.subject.ilike(term),
+            Report.location.ilike(term),
+            Report.students.any(or_(Student.first_name.ilike(term), Student.last_name.ilike(term), Student.document_id.ilike(term))),
+        ))
     if user.role == "teacher":
         assigned = select(TeacherSection.section_id).where(TeacherSection.teacher_id == user.id)
         query = query.join(Report.students).where(Student.section_id.in_(assigned)).distinct()
     reports, total = paged_rows(db, query, page, page_size)
-    items = [ReportOut(id=r.id, severity=r.severity, description=r.description, action_taken=r.action_taken, occurred_at=r.occurred_at, student_ids=[s.id for s in r.students]).model_dump() for r in reports]
+    items = [{
+        **ReportOut(id=r.id, severity=r.severity, description=r.description, action_taken=r.action_taken, occurred_at=r.occurred_at, student_ids=[s.id for s in r.students]).model_dump(),
+        "created_at": r.created_at,
+        "subject": r.subject,
+        "location": r.location,
+        "active": r.active,
+        "student_names": ", ".join(f"{student.first_name} {student.last_name}" for student in r.students),
+        "student_documents": ", ".join(student.document_id for student in r.students),
+        "students": [{"id": student.id, "full_name": f"{student.first_name} {student.last_name}", "document_id": student.document_id, "section_name": f"{student.section.year_level}° {student.section.name}"} for student in r.students],
+    } for r in reports]
     return page_payload(items, total, page, page_size)
 
 
@@ -747,9 +823,8 @@ async def import_students(
 
 
 @app.post("/api/citations", status_code=201)
-def create_citation(
+async def create_citation(
     payload: CitationCreate,
-    background_tasks: BackgroundTasks,
     db: Db,
     user: Annotated[User, Depends(allow_roles("admin", "coordinator"))],
 ):
@@ -780,15 +855,33 @@ def create_citation(
     db.add(citation)
     db.commit()
     db.refresh(citation)
-    background_tasks.add_task(send_citation_alert, citation.id)
+    if payload.notify_telegram:
+        await send_citation_alert(citation.id)
+        db.refresh(citation)
     return citation_view(citation)
 
 
 def citation_view(citation: Citation) -> dict:
     guardian = citation.guardian
-    names = ", ".join(sorted({f"{student.first_name} {student.last_name}" for student in guardian.students}))
-    documents = ", ".join(sorted({student.document_id for student in guardian.students}))
-    return {"id": citation.id, "guardian_id": guardian.id, "guardian_name": guardian.full_name, "guardian_document": guardian.document_id, "student_names": names, "student_documents": documents, "scheduled_at": citation.scheduled_at, "reason": citation.reason, "status": citation.status, "guardian_confirmed": citation.guardian_confirmed}
+    students = citation.report.students if citation.report is not None else guardian.students
+    names = ", ".join(sorted({f"{student.first_name} {student.last_name}" for student in students}))
+    documents = ", ".join(sorted({student.document_id for student in students}))
+    return {
+        "id": citation.id,
+        "guardian_id": guardian.id,
+        "guardian_name": guardian.full_name,
+        "guardian_document": guardian.document_id,
+        "guardian_telegram_linked": bool(guardian.telegram_chat_id),
+        "student_names": names,
+        "student_documents": documents,
+        "scheduled_at": citation.scheduled_at,
+        "reason": citation.reason,
+        "status": citation.status,
+        "guardian_confirmed": citation.guardian_confirmed,
+        "telegram_status": citation.telegram_status,
+        "telegram_sent_at": citation.telegram_sent_at.replace(tzinfo=timezone.utc) if citation.telegram_sent_at and citation.telegram_sent_at.tzinfo is None else citation.telegram_sent_at,
+        "telegram_error_log": citation.telegram_error_log,
+    }
 
 
 @app.get("/api/citations")
@@ -804,7 +897,7 @@ def list_citations(
     page_size: int = Query(20, ge=1, le=100),
 ):
     school_tz = ZoneInfo(os.getenv("SCHOOL_TIMEZONE", "America/Caracas"))
-    query = select(Citation).options(joinedload(Citation.guardian).joinedload(Guardian.students)).order_by(Citation.scheduled_at.desc())
+    query = select(Citation).options(joinedload(Citation.guardian).joinedload(Guardian.students), joinedload(Citation.report).joinedload(Report.students)).order_by(Citation.scheduled_at.desc())
     if day is not None:
         from_date = day
         to_date = day
@@ -827,9 +920,21 @@ def list_citations(
 def guardian_citations(guardian_id: int, db: Db, page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), _: User = Depends(allow_roles("admin", "coordinator", "doorman"))):
     if db.get(Guardian, guardian_id) is None:
         raise HTTPException(status_code=404, detail="Representante no encontrado")
-    query = select(Citation).options(joinedload(Citation.guardian).joinedload(Guardian.students)).where(Citation.guardian_id == guardian_id).order_by(Citation.scheduled_at.desc())
+    query = select(Citation).options(joinedload(Citation.guardian).joinedload(Guardian.students), joinedload(Citation.report).joinedload(Report.students)).where(Citation.guardian_id == guardian_id).order_by(Citation.scheduled_at.desc())
     citations, total = paged_rows(db, query, page, page_size)
     return page_payload([citation_view(item) for item in citations], total, page, page_size)
+
+
+@app.post("/api/citations/{citation_id}/send-telegram")
+async def send_citation_telegram(citation_id: int, db: Db, _: User = Depends(allow_roles("admin", "coordinator"))):
+    citation = db.get(Citation, citation_id)
+    if citation is None:
+        raise HTTPException(status_code=404, detail="Citación no encontrada")
+    if citation.status == "cancelled":
+        raise HTTPException(status_code=409, detail="No se pueden enviar citaciones canceladas")
+    await send_citation_alert(citation_id)
+    db.refresh(citation)
+    return citation_view(citation)
 
 
 @app.patch("/api/citations/{citation_id}")
@@ -861,10 +966,18 @@ def update_citation(citation_id: int, payload: CitationUpdate, db: Db, user: Ann
     duplicate = db.scalar(select(Citation.id).where(Citation.id != citation_id, Citation.guardian_id == guardian_id, Citation.status == "pending", Citation.scheduled_at >= slot_start, Citation.scheduled_at < slot_end))
     if duplicate:
         raise HTTPException(status_code=409, detail="El representante ya tiene una cita pendiente en ese horario")
+    updated_reason = values.get("reason")
+    if updated_reason is None:
+        updated_reason = citation.reason
+    notification_changed = guardian_id != citation.guardian_id or scheduled_at != citation.scheduled_at or updated_reason.strip() != citation.reason
     citation.guardian_id = guardian_id
     citation.scheduled_at = scheduled_at
     if "reason" in values and values["reason"] is not None:
-        citation.reason = values["reason"].strip()
+        citation.reason = updated_reason.strip()
+    if notification_changed:
+        citation.telegram_status = "NOT_SENT"
+        citation.telegram_sent_at = None
+        citation.telegram_error_log = None
     db.commit()
     db.refresh(citation)
     return citation_view(citation)
@@ -896,13 +1009,16 @@ def update_citation_status(
 
 
 @app.get("/api/guardians/{guardian_id}/telegram-link")
-def telegram_link(guardian_id: int, db: Db, _: User = Depends(allow_roles("admin", "coordinator"))):
+async def telegram_link(guardian_id: int, db: Db, _: User = Depends(allow_roles("admin", "coordinator"))):
     guardian = db.get(Guardian, guardian_id)
     if guardian is None:
         raise HTTPException(status_code=404, detail="Representante no encontrado")
-    bot_username = os.getenv("TELEGRAM_BOT_USERNAME", "")
+    try:
+        bot_username = await telegram_bot_username()
+    except TelegramConfigurationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     if not bot_username:
-        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_USERNAME no está configurado")
+        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN no está configurado")
     return {"url": f"https://t.me/{bot_username}?start={guardian.telegram_link_token}"}
 
 
@@ -938,14 +1054,14 @@ def student_summary(
     return {
         "student": {"id": student.id, "first_name": student.first_name, "last_name": student.last_name, "document_id": student.document_id, "qr_token": student.qr_token, "section": f"{student.section.year_level}° {student.section.name}"},
         "severity_counts": {severity: sum(report.severity == severity for report in reports) for severity in ("leve", "grave", "muy_grave")},
-        "reports": [{"id": report.id, "severity": report.severity, "description": report.description, "action_taken": report.action_taken, "occurred_at": report.occurred_at, "location": report.location, "subject": report.subject, "student_ids": [item.id for item in report.students]} for report in reports],
+        "reports": [{"id": report.id, "severity": report.severity, "description": report.description, "action_taken": report.action_taken, "occurred_at": report.occurred_at, "created_at": report.created_at, "location": report.location, "subject": report.subject, "student_ids": [item.id for item in report.students]} for report in reports],
         "guardians": [{"id": guardian.id, "full_name": guardian.full_name, "document_id": guardian.document_id, "phone": guardian.phone, "email": guardian.email} for guardian in student.guardians],
         "citations": [citation_view(item) for item in citations],
     }
 
 
 @app.get("/api/guardian/summary")
-def guardian_summary(db: Db, user: Annotated[User, Depends(allow_roles("guardian"))]):
+async def guardian_summary(db: Db, user: Annotated[User, Depends(allow_roles("guardian"))]):
     if user.guardian_id is None:
         raise HTTPException(status_code=404, detail="La cuenta no está vinculada a un representante")
     guardian = db.scalar(select(Guardian).options(joinedload(Guardian.students).joinedload(Student.section)).where(Guardian.id == user.guardian_id))
@@ -958,11 +1074,23 @@ def guardian_summary(db: Db, user: Annotated[User, Depends(allow_roles("guardian
     report_items.sort(key=lambda item: item["occurred_at"], reverse=True)
     citations = db.scalars(select(Citation).where(Citation.guardian_id == guardian.id).order_by(Citation.scheduled_at.desc()).limit(30)).all()
     messages = db.scalars(select(MessageLog).where(MessageLog.guardian_id == guardian.id).order_by(MessageLog.created_at.desc()).limit(50)).all()
+    telegram_url = None
+    telegram_error = None
+    if not guardian.telegram_chat_id:
+        try:
+            bot_username = await telegram_bot_username()
+            if bot_username:
+                telegram_url = f"https://t.me/{bot_username}?start={guardian.telegram_link_token}"
+        except TelegramConfigurationError as error:
+            telegram_error = str(error)
+        if not os.getenv("TELEGRAM_BOT_TOKEN", "").strip() and not telegram_error:
+            telegram_error = "Vinculación por Telegram pendiente de configurar: falta TELEGRAM_BOT_TOKEN."
     return {
         "guardian": {
             "full_name": guardian.full_name,
             "telegram_linked": bool(guardian.telegram_chat_id),
-            "telegram_url": f"https://t.me/{os.getenv('TELEGRAM_BOT_USERNAME')}?start={guardian.telegram_link_token}" if os.getenv("TELEGRAM_BOT_USERNAME") and not guardian.telegram_chat_id else None,
+            "telegram_url": telegram_url,
+            "telegram_error": telegram_error,
         },
         "students": [{"id": student.id, "first_name": student.first_name, "last_name": student.last_name, "section": f"{student.section.year_level}° {student.section.name}"} for student in guardian.students],
         "reports": report_items[:100],

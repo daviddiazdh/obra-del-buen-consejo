@@ -10,6 +10,8 @@ import './admin.css'
 import './admin-config.css'
 import './report-editor.css'
 import './pagination.css'
+import './report-history.css'
+import './modal.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

@@ -39,6 +39,12 @@ class Subject(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
 
+class SectionSubject(Base):
+    __tablename__ = "section_subjects"
+    section_id: Mapped[int] = mapped_column(ForeignKey("sections.id", ondelete="CASCADE"), primary_key=True)
+    subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id", ondelete="CASCADE"), primary_key=True)
+
+
 class TeacherSection(Base):
     __tablename__ = "teacher_sections"
     __table_args__ = (UniqueConstraint("teacher_id", "section_id", "subject_id", name="uq_teacher_section_subject"),)
@@ -56,6 +62,7 @@ class Guardian(Base):
     phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
     email: Mapped[str | None] = mapped_column(String(254), nullable=True)
     telegram_chat_id: Mapped[str | None] = mapped_column(String(80), nullable=True, unique=True)
+    telegram_linked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     telegram_link_token: Mapped[str] = mapped_column(String(64), default=lambda: secrets.token_urlsafe(24), unique=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     students: Mapped[list["Student"]] = relationship(secondary="student_guardians", back_populates="guardians")
@@ -117,7 +124,11 @@ class Citation(Base):
     guardian_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     attended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    telegram_status: Mapped[str] = mapped_column(String(20), default="NOT_SENT")
+    telegram_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    telegram_error_log: Mapped[str | None] = mapped_column(Text, nullable=True)
     guardian: Mapped[Guardian] = relationship()
+    report: Mapped[Report | None] = relationship()
 
 
 class MessageLog(Base):

@@ -3,6 +3,7 @@ import type { FormEvent } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import AdminPanel from './AdminPanel'
 import CitationsView from './CitationsView'
+import ReportsHistoryView from './ReportsHistoryView'
 import StudentProfileView from './StudentProfileView'
 import {
   AlertTriangle, Bell, BookOpen, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight,
@@ -11,10 +12,10 @@ import {
   SlidersHorizontal, Users, UserPlus, X,
 } from 'lucide-react'
 
-type Student = { id: number; first_name: string; last_name: string; document_id: string; section_name: string; qr_token: string }
+type Student = { id: number; first_name: string; last_name: string; document_id: string; section_name: string; section_id: number; qr_token: string }
 type ApiPage<T> = { items: T[]; page: number; page_size: number; total: number; pages: number }
-type GuardianSummary = { guardian: { full_name: string; telegram_linked: boolean; telegram_url: string | null }; students: { id: number; first_name: string; last_name: string; section: string }[]; reports: { student_name: string; severity: string; description: string; action_taken: string | null; occurred_at: string }[]; citations: { id: number; scheduled_at: string; reason: string; status: string; guardian_confirmed: boolean }[]; messages: { id: number; body: string; status: string; created_at: string }[] }
-type StudentProfile = { student: { id: number; first_name: string; last_name: string; document_id: string; qr_token: string; section: string }; severity_counts: Record<string, number>; reports: { id: number; severity: string; description: string; action_taken: string | null; occurred_at: string; location: string | null; subject: string | null; student_ids: number[] }[]; guardians: { full_name: string; document_id: string; phone: string | null; email: string | null }[]; citations: { id: number; scheduled_at: string; reason: string; status: string }[] }
+type GuardianSummary = { guardian: { full_name: string; telegram_linked: boolean; telegram_url: string | null; telegram_error: string | null }; students: { id: number; first_name: string; last_name: string; section: string }[]; reports: { student_name: string; severity: string; description: string; action_taken: string | null; occurred_at: string }[]; citations: { id: number; scheduled_at: string; reason: string; status: string; guardian_confirmed: boolean }[]; messages: { id: number; body: string; status: string; created_at: string }[] }
+type StudentProfile = { student: { id: number; first_name: string; last_name: string; document_id: string; qr_token: string; section: string }; severity_counts: Record<string, number>; reports: { id: number; severity: string; description: string; action_taken: string | null; occurred_at: string; created_at: string; location: string | null; subject: string | null; student_ids: number[] }[]; guardians: { full_name: string; document_id: string; phone: string | null; email: string | null }[]; citations: { id: number; scheduled_at: string; reason: string; status: string }[] }
 type View = 'Inicio' | 'Reportes' | 'Citaciones' | 'Estudiantes' | 'Administración' | 'Importar datos' | 'Portal'
 
 const navItems: { label: View; icon: typeof LayoutDashboard }[] = [
@@ -29,8 +30,28 @@ const navItems: { label: View; icon: typeof LayoutDashboard }[] = [
 const levels = ['Leve', 'Grave', 'Muy grave'] as const
 const levelStyles = ['level-mild', 'level-serious', 'level-critical']
 
+function apiErrorMessage(payload: unknown, fallback: string) {
+  if (!payload || typeof payload !== 'object' || !('detail' in payload)) return fallback
+  const detail = payload.detail
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item) => {
+      if (!item || typeof item !== 'object' || !('msg' in item)) return ''
+      const rawField = 'loc' in item && Array.isArray(item.loc) ? item.loc.slice(-1)[0] : ''
+      const field = rawField === 'description' ? 'Descripción' : rawField === 'action_taken' ? 'Acciones tomadas' : String(rawField)
+      const rawMessage = String(item.msg).replace(/^Value error,\s*/i, '')
+      const lengthError = rawMessage.match(/^string should have at least (\d+) characters?$/i)
+      const message = lengthError ? `debe tener al menos ${lengthError[1]} caracteres` : rawMessage
+      return `${field ? `${field}: ` : ''}${message}`
+    }).filter(Boolean)
+    if (messages.length) return messages.join(' · ')
+  }
+  return fallback
+}
+
 function App() {
   const [view, setView] = useState<View>('Reportes')
+  const [reportMode, setReportMode] = useState<'new' | 'history'>('new')
   const [students, setStudents] = useState<Student[]>([])
   const [token, setToken] = useState(() => localStorage.getItem('obc-token') ?? '')
   const [role, setRole] = useState(() => localStorage.getItem('obc-role') ?? '')
@@ -148,7 +169,8 @@ function App() {
           student_ids: selected.map((student) => student.id),
         }),
       })
-      if (!response.ok) throw new Error('No se pudo guardar el reporte. Revisa la conexión o los datos.')
+      const result = await response.json()
+      if (!response.ok) throw new Error(apiErrorMessage(result, 'No se pudo guardar el reporte. Revisa la conexión o los datos.'))
       setMessage('Reporte registrado. La notificación al representante quedó encolada.')
       setSelected([])
       setIncident('')
@@ -163,7 +185,7 @@ function App() {
   }
 
   const dateLabel = new Intl.DateTimeFormat('es', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date())
-  const greeting = view === 'Reportes' ? 'Registro de incidencia' : view
+  const greeting = view === 'Reportes' ? reportMode === 'new' ? 'Registro de incidencia' : 'Historial de reportes' : view
   const visibleNav = role === 'guardian' ? navItems.filter((item) => item.label === 'Portal') : role === 'doorman' ? navItems.filter((item) => item.label === 'Citaciones') : role === 'teacher' ? navItems.filter((item) => ['Reportes', 'Estudiantes'].includes(item.label)) : role === 'coordinator' ? navItems.filter((item) => ['Inicio', 'Reportes', 'Citaciones', 'Estudiantes'].includes(item.label)) : navItems.filter((item) => item.label !== 'Portal')
 
   async function signIn(event: FormEvent<HTMLFormElement>) {
@@ -230,8 +252,8 @@ function App() {
 
         {view === 'Reportes' ? (
           <section className="content-wrap report-page">
-            <div className="page-heading"><div><p className="eyebrow">AULA · REGISTRO RÁPIDO</p><h1>Nuevo reporte</h1><p className="page-subtitle">Documenta una situación para dar seguimiento oportuno.</p></div><button className="secondary-button" onClick={() => setView('Citaciones')}><CalendarDays size={17} />Ver agenda</button></div>
-            <form className="report-layout" onSubmit={submitReport}>
+            <div className="page-heading"><div><p className="eyebrow">AULA · REGISTRO RÁPIDO</p><h1>{reportMode === 'new' ? 'Nuevo reporte' : 'Historial general de reportes'}</h1><p className="page-subtitle">{reportMode === 'new' ? 'Documenta una situación para dar seguimiento oportuno.' : 'Consulta los reportes del sistema sin abrir cada expediente.'}</p></div><div className="report-page-actions"><button className="secondary-button" onClick={() => setReportMode((mode) => mode === 'new' ? 'history' : 'new')}>{reportMode === 'new' ? 'Historial general' : 'Crear reporte'}</button><button className="secondary-button" onClick={() => setView('Citaciones')}><CalendarDays size={17} />Ver agenda</button></div></div>
+            {reportMode === 'history' ? <ReportsHistoryView token={token} role={role} /> : <form className="report-layout" onSubmit={submitReport}>
               <div className="form-column">
                 <section className="form-section student-section">
                   <div className="section-title"><span className="step-number">1</span><div><h2>Estudiantes involucrados</h2><p>Busca por nombre, documento o sección. Puedes añadir varios.</p></div></div>
@@ -257,8 +279,8 @@ function App() {
                 </section>
               </div>
 
-              <aside className="summary-column"><div className="summary-card"><div className="summary-header"><span className="summary-icon"><ClipboardList size={18} /></span><div><h2>Resumen</h2><p>Revisa antes de guardar</p></div></div><div className="summary-line"><span>Fecha y hora</span><strong><Clock3 size={15} />{new Intl.DateTimeFormat('es', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date())}</strong></div><div className="summary-line"><span>Gravedad</span><strong className={`summary-severity severity-text-${levels.indexOf(severity)}`}>{severity}</strong></div><div className="summary-line"><span>Estudiantes</span><strong>{selected.length} seleccionado{selected.length === 1 ? '' : 's'}</strong></div><div className="notify-note"><Bell size={17} /><span>Se registrará un aviso Telegram cuando el representante haya vinculado su cuenta.</span></div>{message && <p className={`form-message ${message.startsWith('Reporte') ? 'success' : ''}`} role="status">{message}</p>}<button className="submit-button" type="submit" disabled={saving}>{saving ? <LoaderCircle className="spin" size={18} /> : <Send size={17} />}{saving ? 'Guardando…' : 'Registrar reporte'}</button><p className="privacy-note"><ShieldCheck size={14} />Visible solo para personal autorizado</p></div><div className="quick-tip"><AlertTriangle size={18} /><p><strong>¿Necesitas citar?</strong><br />Podrás agendar al representante desde el expediente del reporte.</p></div></aside>
-            </form>
+              <aside className="summary-column"><div className="summary-card"><div className="summary-header"><span className="summary-icon"><ClipboardList size={18} /></span><div><h2>Resumen</h2><p>Revisa antes de guardar</p></div></div><div className="summary-line"><span>Fecha y hora</span><strong><Clock3 size={15} />{new Intl.DateTimeFormat('es', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date())}</strong></div><div className="summary-line"><span>Gravedad</span><strong className={`summary-severity severity-text-${levels.indexOf(severity)}`}>{severity}</strong></div><div className="summary-line"><span>Estudiantes</span><strong>{selected.length} seleccionado{selected.length === 1 ? '' : 's'}</strong></div><div className="notify-note"><Bell size={17} /><span>Se registrará un aviso Telegram cuando el representante haya vinculado su cuenta.</span></div>{message && <p className={`form-message ${message.startsWith('Reporte registrado') ? 'success' : ''}`} role={message.startsWith('Reporte registrado') ? 'status' : 'alert'}>{message}</p>}<button className="submit-button" type="submit" disabled={saving}>{saving ? <LoaderCircle className="spin" size={18} /> : <Send size={17} />}{saving ? 'Guardando…' : 'Registrar reporte'}</button><p className="privacy-note"><ShieldCheck size={14} />Visible solo para personal autorizado</p></div><div className="quick-tip"><AlertTriangle size={18} /><p><strong>¿Necesitas citar?</strong><br />Podrás agendar al representante desde el expediente del reporte.</p></div></aside>
+            </form>}
           </section>
         ) : view === 'Inicio' ? <DashboardView token={token} setView={setView} /> : view === 'Citaciones' ? <CitationsView token={token} role={role} /> : view === 'Administración' ? <AdminPanel token={token} onStudentsChanged={() => setRosterVersion((version) => version + 1)} /> : <OtherView view={view} setView={setView} token={token} onImported={() => setRosterVersion((version) => version + 1)} />}
       </main>
@@ -295,6 +317,7 @@ function OtherView({ view, setView, token, onImported }: { view: View; setView: 
         const data = await response.json()
         if (!response.ok) throw new Error(data.detail || 'No se pudo cargar el portal.')
         setPortal(data)
+        setPortalError(data.guardian.telegram_error ?? '')
       })
       .catch((error: Error) => setPortalError(error.message))
   }, [view, token])

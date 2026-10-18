@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Severity(str, Enum):
@@ -40,6 +40,14 @@ class GuardianCreate(BaseModel):
     email: str | None = Field(default=None, max_length=254)
     student_ids: list[int] = Field(default_factory=list, max_length=100)
 
+    @field_validator("document_id")
+    @classmethod
+    def validate_document_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value.isascii() or not value.isdigit() or not 3 <= len(value) <= 32:
+            raise ValueError("El documento debe contener entre 3 y 32 dígitos")
+        return value
+
 
 class GuardianUpdate(BaseModel):
     full_name: str | None = Field(default=None, min_length=3, max_length=160)
@@ -49,6 +57,16 @@ class GuardianUpdate(BaseModel):
     student_ids: list[int] | None = Field(default=None, max_length=100)
     active: bool | None = None
 
+    @field_validator("document_id")
+    @classmethod
+    def validate_document_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        if not value.isascii() or not value.isdigit() or not 3 <= len(value) <= 32:
+            raise ValueError("El documento debe contener entre 3 y 32 dígitos")
+        return value
+
 
 class StudentCreate(BaseModel):
     first_name: str = Field(min_length=1, max_length=100)
@@ -56,6 +74,14 @@ class StudentCreate(BaseModel):
     document_id: str = Field(min_length=3, max_length=32)
     section_id: int
     guardian_ids: list[int] = Field(default_factory=list, max_length=20)
+
+    @field_validator("document_id")
+    @classmethod
+    def validate_document_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value.isascii() or not value.isdigit() or not 3 <= len(value) <= 32:
+            raise ValueError("El documento debe contener entre 3 y 32 dígitos")
+        return value
 
 
 class StudentUpdate(BaseModel):
@@ -65,6 +91,16 @@ class StudentUpdate(BaseModel):
     section_id: int | None = None
     guardian_ids: list[int] | None = Field(default=None, max_length=20)
     active: bool | None = None
+
+    @field_validator("document_id")
+    @classmethod
+    def validate_document_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        if not value.isascii() or not value.isdigit() or not 3 <= len(value) <= 32:
+            raise ValueError("El documento debe contener entre 3 y 32 dígitos")
+        return value
 
 
 class PasswordChange(BaseModel):
@@ -90,6 +126,7 @@ class SectionCreate(BaseModel):
     year_level: int = Field(ge=1, le=5)
     name: str = Field(min_length=1, max_length=20)
     teacher_id: int | None = None
+    subject_ids: list[int] = Field(default_factory=list, max_length=100)
 
 
 class SectionUpdate(BaseModel):
@@ -97,6 +134,7 @@ class SectionUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=20)
     teacher_id: int | None = None
     active: bool | None = None
+    subject_ids: list[int] | None = Field(default=None, max_length=100)
 
 
 class TokenResponse(BaseModel):
@@ -154,6 +192,7 @@ class CitationCreate(BaseModel):
     report_id: int | None = None
     scheduled_at: datetime
     reason: str = Field(min_length=3, max_length=2000)
+    notify_telegram: bool = True
 
 
 class CitationUpdate(BaseModel):

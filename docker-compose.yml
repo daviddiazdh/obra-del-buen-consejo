@@ -27,7 +27,9 @@ services:
       BOOTSTRAP_NAME: ${BOOTSTRAP_NAME:-Administrador del sistema}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+      TELEGRAM_BOT_NAME: ${TELEGRAM_BOT_NAME:-}
       TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      INSTITUTION_NAME: ${INSTITUTION_NAME:-Obra del Buen Consejo}
       SCHOOL_TIMEZONE: ${SCHOOL_TIMEZONE:-America/Caracas}
       TZ: ${TZ:-America/Caracas}
     depends_on:
@@ -56,6 +58,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-obc}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-obc}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      INSTITUTION_NAME: ${INSTITUTION_NAME:-Obra del Buen Consejo}
     depends_on:
       db:
         condition: service_healthy
