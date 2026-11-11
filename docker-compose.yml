@@ -16,8 +16,16 @@ services:
       retries: 12
 
   api:
+    # "image" siempre apunta a la etiqueta :latest publicada por GitHub
+    # Actions. "docker compose pull" trae la más reciente; la versión que
+    # realmente se reporta en el panel viene grabada DENTRO de la imagen
+    # (ENV APP_VERSION en backend/Dockerfile), nunca de esta variable, para
+    # que el número mostrado sea siempre el que de verdad está corriendo.
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/daviddiazdh/obra-del-buen-consejo}-api:latest
     build:
       context: ./backend
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-obc}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-obc}
@@ -32,11 +40,13 @@ services:
       INSTITUTION_NAME: ${INSTITUTION_NAME:-Obra del Buen Consejo}
       SCHOOL_TIMEZONE: ${SCHOOL_TIMEZONE:-America/Caracas}
       TZ: ${TZ:-America/Caracas}
+      UPDATER_URL: http://updater:8090
     depends_on:
       db:
         condition: service_healthy
 
   web:
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/daviddiazdh/obra-del-buen-consejo}-web:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -48,6 +58,27 @@ services:
       - ./deploy/certs:/etc/nginx/certs:ro
     depends_on:
       - api
+
+  # Vigila GitHub Releases y, cuando el admin lo aprueba desde el panel,
+  # lanza el despliegue (docker compose pull + up -d). No publica puertos:
+  # solo es alcanzable desde "api" por la red interna de Docker Compose.
+  # Requiere acceso al socket de Docker del host: equivale a privilegios de
+  # root en esa máquina. Mantener este servicio solo en servidores de
+  # confianza, nunca expuesto a la LAN.
+  updater:
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/daviddiazdh/obra-del-buen-consejo}-updater:latest
+    build:
+      context: ./backend/updater
+    restart: unless-stopped
+    environment:
+      GITHUB_REPO: ${GITHUB_REPO:-daviddiazdh/obra-del-buen-consejo}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      CHECK_INTERVAL_MINUTES: ${CHECK_INTERVAL_MINUTES:-30}
+      HOST_PROJECT_DIR: ${HOST_PROJECT_DIR:?Set HOST_PROJECT_DIR in .env to the absolute path of this project on the host}
+      COMPOSE_FILE: docker-compose.yml
+      TZ: ${TZ:-America/Caracas}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
   telegram-bot:
     build:

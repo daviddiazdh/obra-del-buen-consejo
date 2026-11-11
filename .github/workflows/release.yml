@@ -1,0 +1,77 @@
+# Construye y publica las imágenes Docker en GitHub Container Registry (GHCR)
+# cada vez que se sube una etiqueta de versión (ej. v1.4.0), y crea el
+# Release correspondiente. El servidor de la oficina (servicio "updater")
+# consulta ese Release para saber si hay una versión nueva disponible.
+#
+# Para publicar una versión nueva:
+#   git tag v1.4.0
+#   git push origin v1.4.0
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write   # crear el Release
+  packages: write   # publicar en GHCR
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - service: api
+            context: ./backend
+            dockerfile: ./backend/Dockerfile
+          - service: web
+            context: .
+            dockerfile: ./Dockerfile
+          - service: updater
+            context: ./backend/updater
+            dockerfile: ./backend/updater/Dockerfile
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Iniciar sesión en GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Preparar Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Construir y publicar ${{ matrix.service }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          build-args: |
+            APP_VERSION=${{ github.ref_name }}
+          tags: |
+            ${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:${{ github.ref_name }}
+            ${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Crear Release en GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true

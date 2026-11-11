@@ -111,6 +111,96 @@ Para activar Telegram en desarrollo local, coloca únicamente el token de BotFat
 
 El importador acepta `.xlsx` y `.csv`, máximo 10 MB. Usa la plantilla `deploy/plantilla-estudiantes.csv`; columnas obligatorias: `nombres, apellidos, documento, anio, seccion`; opcionales: `representante, documento_representante, telefono, correo`. Si alguna fila no es válida no se inserta ninguna. También puedes crear cursos, estudiantes, representantes y cuentas desde Administración sin Excel; el QR estudiantil se genera al guardar.
 
+## Actualizaciones (CD)
+
+El servidor de la oficina puede detectar, por sí mismo, cuándo hay una
+versión nueva publicada en GitHub y actualizarse con la aprobación de un
+administrador, sin que nadie tenga que entrar por SSH a esa máquina.
+
+```text
+git tag vX.Y.Z + push
+        │
+        ▼
+GitHub Actions construye 3 imágenes (api, web, updater)
+y las publica en GHCR + crea un Release
+        │
+        ▼
+Servicio "updater" en la oficina revisa el Release más reciente
+cada CHECK_INTERVAL_MINUTES (por defecto 30)
+        │
+        ▼
+Panel Administración → pestaña "Actualizaciones" muestra el aviso
+        │  (el admin pulsa "Actualizar ahora")
+        ▼
+"updater" lanza un contenedor desplegador independiente que hace
+docker compose pull && docker compose up -d
+```
+
+### Publicar una versión nueva
+
+```bash
+git tag v1.4.0
+git push origin v1.4.0
+```
+
+Eso dispara `.github/workflows/release.yml`: construye las imágenes de
+`api`, `web` y `updater`, las publica en `ghcr.io/daviddiazdh/obra-del-buen-consejo-*`
+(etiquetadas con la versión y con `latest`) y crea el Release en GitHub con
+notas generadas automáticamente a partir de los commits.
+
+### Configurar el servidor de la oficina (una sola vez)
+
+1. En `.env`, completa `GITHUB_REPO`, `GITHUB_TOKEN` (un token de GitHub de
+   solo lectura; obligatorio si el repositorio es privado) y
+   `HOST_PROJECT_DIR` con la ruta absoluta de esta carpeta **tal como la ve
+   el sistema operativo del servidor** (ver comentarios en `.env.example`).
+2. Si el repositorio de GitHub es privado, las imágenes en GHCR también lo
+   son: el Docker del servidor necesita su propio inicio de sesión, aparte
+   del `GITHUB_TOKEN` de arriba (ese solo lo usa el servicio `updater` para
+   leer la API de GitHub). Una sola vez, en el servidor:
+   ```bash
+   docker login ghcr.io -u <tu-usuario-de-GitHub>
+   ```
+   Pide un token (PAT) con permiso `read:packages` cuando lo solicite.
+3. `docker compose up -d --build` como siempre. El servicio `updater`
+   queda escuchando; no publica ningún puerto, solo es alcanzable desde
+   `api` por la red interna de Docker Compose.
+
+### Cómo se aplica una actualización
+
+Un administrador entra a **Administración → Actualizaciones**, ve la
+versión instalada y la última publicada (con sus notas), y pulsa
+**Actualizar ahora**. A partir de ahí:
+
+- El backend valida que de verdad haya una versión nueva y pide al
+  servicio `updater` que inicie el despliegue.
+- `updater` lanza, vía el socket de Docker, un contenedor desplegador
+  *independiente* (no gestionado por `docker compose`) que ejecuta
+  `docker compose pull && docker compose up -d --remove-orphans`. Al ser
+  independiente, sigue corriendo aunque el propio `updater` —o la API— se
+  reinicien a mitad del proceso, que es justamente lo que pasa cuando la
+  nueva versión también los reemplaza.
+- El panel va mostrando el progreso (con el registro del contenedor
+  desplegador) y, cuando la API vuelve a responder con la nueva versión,
+  ofrece recargar la página.
+- La aplicación queda brevemente fuera de servicio (segundos a un minuto)
+  mientras se recrean los contenedores; no hay downtime cero.
+
+### Advertencias de seguridad
+
+El servicio `updater` tiene montado el socket de Docker del host
+(`/var/run/docker.sock`), lo cual equivale a privilegios de administrador
+sobre esa máquina. Es una condición necesaria para que pueda reiniciar el
+resto de los contenedores. Por eso:
+
+- Nunca le publiques un puerto (`ports:`) ni lo expongas a la LAN; solo
+  debe ser alcanzable desde `api`.
+- Restringe quién tiene acceso físico o remoto a la máquina que corre
+  Docker Compose, igual que harías con cualquier servidor con privilegios
+  de root.
+- El `GITHUB_TOKEN` de `.env` solo necesita permiso de lectura sobre el
+  repositorio; no uses un token con más alcance del necesario.
+
 ## Desarrollo y operación
 
 ```powershell

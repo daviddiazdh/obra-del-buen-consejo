@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
+import httpx
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
@@ -57,6 +58,8 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 Db = Annotated[Session, Depends(get_db)]
+APP_VERSION = os.getenv("APP_VERSION", "dev")
+UPDATER_URL = os.getenv("UPDATER_URL", "http://updater:8090")
 
 
 def page_payload(items: list, total: int, page: int, page_size: int) -> dict:
@@ -1111,3 +1114,43 @@ def confirm_guardian_citation(
     citation.guardian_confirmed = True
     db.commit()
     return {"id": citation.id, "guardian_confirmed": citation.guardian_confirmed}
+
+
+# --- Actualizaciones (CD) ---------------------------------------------------
+# El servicio "updater" no tiene autenticación propia: solo es alcanzable
+# desde este contenedor por la red interna de Docker Compose. Estas tres
+# rutas son el único punto de entrada, y quedan restringidas a admin igual
+# que el resto de Administración.
+
+async def _updater_request(method: str, path: str, **kwargs) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.request(method, f"{UPDATER_URL}{path}", **kwargs)
+        if response.status_code >= 400:
+            try:
+                detail = response.json().get("detail", response.text)
+            except ValueError:
+                detail = response.text
+            raise HTTPException(status_code=response.status_code, detail=detail)
+        return response.json()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail="El servicio de actualizaciones no está disponible en este servidor.") from exc
+
+
+@app.get("/api/system/version")
+async def system_version(_: User = Depends(allow_roles("admin"))):
+    info = await _updater_request("GET", "/version", params={"current": APP_VERSION})
+    return {**info, "current": APP_VERSION}
+
+
+@app.post("/api/system/update")
+async def system_update(_: User = Depends(allow_roles("admin"))):
+    info = await _updater_request("GET", "/version", params={"current": APP_VERSION})
+    if not info.get("update_available"):
+        raise HTTPException(status_code=409, detail="No hay una actualización disponible.")
+    return await _updater_request("POST", "/update", json={"target_version": info["latest"]})
+
+
+@app.get("/api/system/update/status")
+async def system_update_status(_: User = Depends(allow_roles("admin"))):
+    return await _updater_request("GET", "/update/status")
