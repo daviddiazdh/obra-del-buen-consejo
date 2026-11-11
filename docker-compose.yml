@@ -1,3 +1,10 @@
+# Nombre fijo del proyecto Compose. Sin él, Compose usa el nombre de la
+# carpeta, y el contenedor desplegador del updater (que ve el proyecto desde
+# otra ruta) crearía un SEGUNDO stack con otra base de datos vacía. Coincide
+# con el nombre de la carpeta del repositorio para conservar el volumen
+# postgres_data de instalaciones existentes.
+name: obra-del-buen-consejo
+
 services:
   db:
     image: postgres:16-alpine
@@ -80,9 +87,16 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
+  # Usa la misma imagen que "api" (mismo código de backend), así se descarga
+  # de GHCR y se actualiza junto con el resto. Para que el updater lo
+  # mantenga al día, actívalo con COMPOSE_PROFILES=telegram en .env (el
+  # instalador lo hace si configuras un token de Telegram).
   telegram-bot:
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/daviddiazdh/obra-del-buen-consejo}-api:latest
     build:
       context: ./backend
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
     command: ["python", "telegram_bot.py"]
     restart: unless-stopped
     profiles: ["telegram"]

@@ -8,3 +8,5 @@ __pycache__/
 *.db
 backend/.pytest_cache/
 deploy/certs/
+instalacion.log
+certificado-para-dispositivos.crt

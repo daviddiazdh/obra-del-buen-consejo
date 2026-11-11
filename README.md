@@ -83,7 +83,42 @@ Todas usan prefijo `/api`; excepto health y login, requieren `Authorization: Bea
 
 Todas las listas limitan la página a 100 filas como máximo. El historial general permite buscar reportes por descripción, estudiante, documento, materia o lugar; administración y coordinación pueden incluir registros desactivados. OpenAPI interactivo: `https://<IP-del-servidor>/api/docs`.
 
-## Ejecución local en LAN (Docker)
+## Instalación en el equipo de la oficina (asistente)
+
+El asistente instala Docker si falta, genera la configuración con contraseñas
+aleatorias, crea el certificado HTTPS, abre el firewall, descarga la última
+versión publicada en GHCR y arranca el sistema. No hace falta saber Docker.
+
+1. En GitHub, abre **Releases**, elige la última versión y descarga
+   **Source code (zip)**. Descomprímelo en una carpeta fija, por ejemplo
+   `C:\ObraDelBuenConsejo` o `/opt/obra-del-buen-consejo`. **No la muevas
+   después**: las actualizaciones automáticas dependen de esa ruta.
+2. Ejecuta el asistente:
+   - **Windows 10/11**: doble clic en `instalar-windows.bat` y acepta el permiso
+     de administrador. Si Windows necesita reiniciar (para activar WSL2 o tras
+     instalar Docker Desktop), el asistente continúa solo al volver a iniciar sesión.
+   - **Linux (Ubuntu/Debian)**: `sudo bash instalar-linux.sh`.
+3. Al terminar muestra la dirección (`https://<IP>`), el usuario y una
+   **contraseña de administrador generada**, que solo se muestra esa vez.
+   Anótala y cámbiala tras el primer inicio de sesión.
+4. Instala `certificado-para-dispositivos.crt` en cada teléfono o tablet.
+
+Se puede volver a ejecutar sin riesgo: conserva `.env` (contraseñas y datos)
+y solo rehace lo que falte; por ejemplo, regenera el certificado si cambió la IP.
+El registro queda en `instalacion.log`, que nunca incluye la contraseña.
+
+Requisitos y limitaciones:
+- Windows: compilación 19044 (21H2) o superior, virtualización activa en la
+  BIOS, unos 10 GB libres e Internet durante la instalación. Docker Desktop
+  arranca al **iniciar sesión**, así que el equipo debe quedar encendido y con
+  la sesión abierta (configura el inicio de sesión automático si hace falta).
+  Docker Desktop es gratuito para organizaciones de menos de 250 empleados y
+  menos de 10 M USD de ingresos anuales.
+- Linux: Docker Engine arranca con el sistema, sin necesidad de iniciar sesión.
+- Conviene que la IP del equipo sea fija (reserva DHCP en el router): el
+  certificado y los dispositivos dependen de ella.
+
+## Ejecución local en LAN (Docker manual)
 
 Requisitos: Docker Desktop/Engine con Compose v2 y OpenSSL. Desde PowerShell en el directorio del proyecto:
 

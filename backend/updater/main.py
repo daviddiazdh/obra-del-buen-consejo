@@ -159,15 +159,23 @@ def start_update(payload: UpdateRequest) -> dict:
         "-c",
         f"docker compose -f {COMPOSE_FILE} pull && docker compose -f {COMPOSE_FILE} up -d --remove-orphans",
     ]
+    # El proyecto se monta en la MISMA ruta que tiene en el host. Docker
+    # Compose convierte las rutas relativas del docker-compose.yml (por
+    # ejemplo ./deploy/certs) en absolutas usando el directorio de trabajo,
+    # y esas rutas absolutas las interpreta el daemon del HOST. Si el
+    # proyecto se montara en otra ruta (p. ej. /stack), los bind mounts
+    # apuntarían a carpetas inexistentes en el host.
+    # En Windows con Docker Desktop, HOST_PROJECT_DIR debe venir con la forma
+    # que ve el daemon: /run/desktop/mnt/host/c/... (el instalador la escribe).
     try:
         client.containers.run(
             image=DEPLOYER_IMAGE,
             command=command,
             name=name,
-            working_dir="/stack",
+            working_dir=HOST_PROJECT_DIR,
             volumes={
                 "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"},
-                HOST_PROJECT_DIR: {"bind": "/stack", "mode": "rw"},
+                HOST_PROJECT_DIR: {"bind": HOST_PROJECT_DIR, "mode": "rw"},
             },
             labels={DEPLOYER_LABEL_KEY: DEPLOYER_LABEL_VALUE, "obc.updater.target_version": payload.target_version},
             detach=True,

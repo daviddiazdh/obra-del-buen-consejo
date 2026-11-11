@@ -1,0 +1,5 @@
+# Los scripts de shell DEBEN tener finales de línea LF: con CRLF, bash en
+# Linux falla ("$'\r': command not found"). Los de Windows, CRLF.
+*.sh   text eol=lf
+*.ps1  text eol=crlf
+*.bat  text eol=crlf

@@ -50,7 +50,19 @@ src/
 deploy/
   nginx.conf, generate-cert.{sh,ps1}, plantilla-estudiantes.csv
 .github/workflows/release.yml  # Build + push a GHCR + Release al subir tag v*.*.*
+instalar-windows.{bat,ps1}     # Asistente de instalación Windows (instala Docker Desktop, .env, cert, arranca)
+instalar-linux.sh              # Asistente equivalente para Ubuntu/Debian
 ```
+
+Asistentes de instalación: `instalar-windows.ps1` debe seguir siendo
+compatible con **PowerShell 5.1** y guardarse en **UTF-8 con BOM** (sin BOM,
+5.1 rompe las tildes); `instalar-linux.sh` va con finales LF
+(`.gitattributes`). Ambos escriben `HOST_PROJECT_DIR`: en Windows con la
+forma `/run/desktop/mnt/host/c/...`, que es la ruta que ve el daemon. El
+desplegador del `updater` monta el proyecto **en esa misma ruta** y
+`docker-compose.yml` fija `name: obra-del-buen-consejo`. No cambies ninguna
+de las dos cosas: las rutas relativas de los bind mounts y el volumen de
+Postgres dependen de ellas.
 
 No hay React Router: la navegación es un `useState<View>` en `App.tsx` y cada
 rol ve un subconjunto de vistas (`visibleNav`).
